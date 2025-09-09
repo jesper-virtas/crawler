@@ -1,0 +1,46 @@
+name: batch-crawl-to-n8n
+on:
+  schedule:
+    - cron: "5 7,12,16 * * 1-5"   # 3 ggr per vardag
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Cachea Playwright-browser (spar minuter!)
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install crawl4ai
+          python -m playwright install --with-deps chromium
+
+      - name: Run batch crawl
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+          # Välj ETT av nedan:
+          # 1) Läs från Google Sheet (CSV public to web):
+          SHEET_URL: ${{ secrets.SHEET_URL }}
+          # 2) Eller läs från repo-fil (urls.txt). Lämna SHEET_URL tomt om du vill använda fil.
+          URLS_FILE: urls.txt
+          # Justera vid behov:
+          CONCURRENCY: "4"
+          WAIT_MS: "6000"
+          TIMEOUT: "45"
+        run: |
+          python fetch_crawl4ai.py
