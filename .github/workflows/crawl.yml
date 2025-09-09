@@ -27,27 +27,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-chromium-v1
-          restore-keys: |
-            ${{ runner.os }}-playwright-
-
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+
+      - name: Install Playwright browser
+        run: python -m playwright install chromium
 
       - name: Verify N8N webhook secret is present
         run: |
@@ -66,14 +52,6 @@ jobs:
           else
             echo "No SHEET_URL provided (input/secret). Will use urls.txt."
           fi
-
-      - name: Ping n8n webhook (sanity)
-        env:
-          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
-        run: |
-          curl -sS -X POST -H "content-type: application/json" \
-            "$N8N_WEBHOOK_URL" \
-            -d '{"ping":"ok","source":"github-actions"}' || true
 
       - name: Run batch crawl
         env:
