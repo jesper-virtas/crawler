@@ -11,7 +11,6 @@ on:
         required: false
         default: "4"
 
-
 concurrency:
   group: "batch-crawl"
   cancel-in-progress: true
@@ -28,7 +27,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Cachea pip (sparar nedladdade hjul/whls)
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -37,7 +35,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # Cachea Playwright-browsers (största tidsbesparingen efter första körningen)
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -52,7 +49,14 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # Sätt SHEET_URL från inputs eller secrets (fallback till urls.txt om inget finns)
+      - name: Verify N8N webhook secret is present
+        run: |
+          if [ -n "${{ secrets.N8N_WEBHOOK_URL }}" ]; then
+            echo "OK: N8N_WEBHOOK_URL secret is set"
+          else
+            echo "MISSING: N8N_WEBHOOK_URL secret" && exit 1
+          fi
+
       - name: Resolve SHEET_URL
         run: |
           if [ -n "${{ inputs.sheet_url }}" ]; then
@@ -62,6 +66,14 @@ jobs:
           else
             echo "No SHEET_URL provided (input/secret). Will use urls.txt."
           fi
+
+      - name: Ping n8n webhook (sanity)
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+        run: |
+          curl -sS -X POST -H "content-type: application/json" \
+            "$N8N_WEBHOOK_URL" \
+            -d '{"ping":"ok","source":"github-actions"}' || true
 
       - name: Run batch crawl
         env:
