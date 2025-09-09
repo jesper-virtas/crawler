@@ -1,0 +1,8 @@
+{
+  "name": "crawl4ai-batch",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "crawl4ai": "^0.4.22"
+  }
+}
