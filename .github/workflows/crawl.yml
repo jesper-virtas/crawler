@@ -1,13 +1,26 @@
 name: batch-crawl-to-n8n
+
 on:
-  schedule:
-    - cron: "5 7,12,16 * * 1-5"   # 3 ggr per vardag
-  workflow_dispatch: {}
+  # 1) Manuell/extern start via API (från n8n)
+  workflow_dispatch:
+    inputs:
+      sheet_url:
+        description: "Google Sheet CSV (optional). If empty, uses repo urls.txt"
+        required: false
+      concurrency:
+        description: "Parallel fetches"
+        required: false
+        default: "4"
+
+concurrency:
+  group: "batch-crawl"
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@v4
 
@@ -16,7 +29,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Cachea Playwright-browser (spar minuter!)
+      # Cacha Playwright-browser för att spara Actions-minuter
       - name: Cache Playwright browsers
         id: cache-playwright
         uses: actions/cache@v4
@@ -32,14 +45,15 @@ jobs:
 
       - name: Run batch crawl
         env:
+          # Webhook till n8n (från repo secret)
           N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
-          # Välj ETT av nedan:
-          # 1) Läs från Google Sheet (CSV public to web):
-          SHEET_URL: ${{ secrets.SHEET_URL }}
-          # 2) Eller läs från repo-fil (urls.txt). Lämna SHEET_URL tomt om du vill använda fil.
+
+          # Om input saknas används secret SHEET_URL eller faller tillbaka till urls.txt
+          SHEET_URL: ${{ inputs.sheet_url || secrets.SHEET_URL }}
+
+          # Justerbar parallellism (från input, default 4)
+          CONCURRENCY: ${{ inputs.concurrency }}
           URLS_FILE: urls.txt
-          # Justera vid behov:
-          CONCURRENCY: "4"
           WAIT_MS: "6000"
           TIMEOUT: "45"
         run: |
