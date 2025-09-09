@@ -1,22 +1,22 @@
-import os, csv, io, time, json, asyncio, datetime, re
-from typing import List, Tuple
+import os, csv, io, time, json, asyncio, datetime
+from typing import List
 import requests
-from bs4 import BeautifulSoup
-from dateutil import parser as dateparser
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
 
+# --- Konfiguration via env ---
 WEBHOOK = os.getenv("N8N_WEBHOOK_URL")
 SHEET_URL = os.getenv("SHEET_URL", "").strip()
 URLS_FILE = os.getenv("URLS_FILE", "urls.txt")
 CONCURRENCY = int(os.getenv("CONCURRENCY", "4"))
-WAIT_MS = int(os.getenv("WAIT_MS", "6000"))   # vänta igenom ev. Cloudflare-sida
-TIMEOUT = int(os.getenv("TIMEOUT", "45"))
+WAIT_MS = int(os.getenv("WAIT_MS", "6000"))     # vänta igenom ev. "Just a moment…"
+TIMEOUT = int(os.getenv("TIMEOUT", "45"))       # (ej direkt använt här, behåll för ev. framtida timeout-hantering)
 
 assert WEBHOOK, "N8N_WEBHOOK_URL not set"
 
+# --- Hjälpare ---
 def looks_like_url(s: str) -> bool:
     s = (s or "").strip()
     return s.startswith("http://") or s.startswith("https://")
@@ -29,6 +29,10 @@ def read_urls_from_txt(path: str) -> List[str]:
         return []
 
 def read_urls_from_sheet(url: str) -> List[str]:
+    """
+    Läser en publik CSV (Google Sheet export) och letar efter kolumnen 'URL'.
+    Fallback: första kolumnen.
+    """
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     data = r.content.decode("utf-8", errors="ignore")
@@ -45,121 +49,62 @@ def read_urls_from_sheet(url: str) -> List[str]:
             if idx < len(row) and looks_like_url(row[idx]):
                 urls.append(row[idx].strip())
     else:
-        # fallback: första kolumnen
         for row in rows[1:]:
             if row and looks_like_url(row[0]):
                 urls.append(row[0].strip())
     return urls
 
-def extract_meta(html: str, url: str) -> Tuple[str, str, str, str, List[str]]:
+def get_markdowns(res):
     """
-    Returnerar (title, canonical, published_time_iso, lang, links)
-    Försök att läsa från og:taggar, schema.org och vanliga meta-taggar.
+    Robust extraktion av markdown ur Crawl4AI-resultat.
+    Returnerar (md_raw, md_fit) oavsett om res.markdown är:
+    - str
+    - dict med nycklar 'raw_markdown'/'fit_markdown'
+    - objekt med attribut .raw_markdown / .fit_markdown
     """
-    title = ""
-    canonical = ""
-    published_iso = ""
-    lang = ""
-    links: List[str] = []
-    try:
-        soup = BeautifulSoup(html or "", "html.parser")
+    m = getattr(res, "markdown", None)
+    md_raw = ""
+    md_fit = ""
 
-        # html-lang
-        if soup.html and soup.html.get("lang"):
-            lang = soup.html["lang"].strip()
+    if m is None:
+        return md_raw, md_fit
 
-        # title
-        mt = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "title"})
-        if mt and mt.get("content"): title = mt["content"].strip()
-        if not title and soup.title and soup.title.string:
-            title = soup.title.string.strip()
+    # 1) ren sträng
+    if isinstance(m, str):
+        md_raw = m
+        md_fit = m
+        return md_raw, md_fit
 
-        # canonical
-        can = soup.find("link", rel=lambda v: v and "canonical" in v)
-        if can and can.get("href"): canonical = can["href"].strip()
+    # 2) dict-lik
+    if isinstance(m, dict):
+        md_raw = m.get("raw_markdown") or m.get("raw") or ""
+        md_fit = m.get("fit_markdown") or m.get("fit") or "" or md_raw
+        return md_raw, md_fit
 
-        # published time (pröva flera varianter)
-        date_candidates = []
-        for sel in [
-            {"property": "article:published_time"},
-            {"name": "article:published_time"},
-            {"property": "og:updated_time"},
-            {"name": "pubdate"},
-            {"itemprop": "datePublished"},
-            {"name": "date"},
-        ]:
-            m = soup.find("meta", attrs=sel)
-            if m and m.get("content"):
-                date_candidates.append(m["content"].strip())
+    # 3) objekt med attribut
+    md_raw = getattr(m, "raw_markdown", None) or getattr(m, "raw", "") or ""
+    md_fit = getattr(m, "fit_markdown", None) or getattr(m, "fit", "") or md_raw
+    return md_raw, md_fit
 
-        # schema.org JSON-LD
-        for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
-            try:
-                data = json.loads(script.string or "{}")
-                if isinstance(data, list):
-                    for obj in data:
-                        if isinstance(obj, dict) and obj.get("datePublished"):
-                            date_candidates.append(str(obj["datePublished"]))
-                elif isinstance(data, dict) and data.get("datePublished"):
-                    date_candidates.append(str(data["datePublished"]))
-            except Exception:
-                pass
-
-        # fallback: datum i text (YYYY-MM-DD etc)
-        if not date_candidates:
-            m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", html)
-            if m: date_candidates.append(m.group(1))
-
-        # parse första rimliga kandidat
-        for d in date_candidates:
-            try:
-                dt = dateparser.parse(d)
-                if dt: 
-                    published_iso = dt.astimezone(datetime.timezone.utc).isoformat()
-                    break
-            except Exception:
-                continue
-
-        # länkar
-        seen = set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            if looks_like_url(href) and href not in seen:
-                seen.add(href)
-                links.append(href)
-
-    except Exception:
-        pass
-
-    return (title, canonical or url, published_iso, lang, links)
-
+# --- Crawl ---
 async def crawl_one(crawler, url: str, run_cfg: CrawlerRunConfig, sem: asyncio.Semaphore, results: list):
     t0 = time.time()
     status, err = "ok", None
     try:
         async with sem:
             res = await crawler.arun(url=url, config=run_cfg)
-            # Vänta igenom ev. Cloudflare/JS
+            # Vänta igenom JS/Cloudflare om det behövs
             await asyncio.sleep(WAIT_MS / 1000)
 
-            # Clean/fit markdown direkt från Crawl4AI:
-            md_raw = res.markdown.raw_markdown if getattr(res, "markdown", None) else ""
-            md_fit = res.markdown.fit_markdown if getattr(res, "markdown", None) else ""
-            html = res.html or ""
-
-            title, canonical, published_iso, lang, links = extract_meta(html, url)
+            md_raw, md_fit = get_markdowns(res)
+            html = getattr(res, "html", "") or ""
 
             payload = {
                 "url": url,
-                "canonical_url": canonical,
-                "title": title,
-                "published_time": published_iso,     # ISO 8601 (UTC) om hittad
-                "lang": lang or "",
-                "markdown_raw": md_raw,              # full markdown
-                "markdown_fit": md_fit,              # rensad/”news-vänlig”
-                "html": html,                        # rå html om du vill debugga
-                "links": links[:100],                # klipp listan lite
-                "word_count": len((md_fit or md_raw).split()),
+                "markdown_fit": md_fit,
+                "markdown_raw": md_raw,
+                # Behåll html för felsökning – ta bort om du vill minimera payload:
+                "html": html,
                 "fetched_at": datetime.datetime.utcnow().isoformat() + "Z",
                 "source": "github-actions"
             }
@@ -169,15 +114,20 @@ async def crawl_one(crawler, url: str, run_cfg: CrawlerRunConfig, sem: asyncio.S
     except Exception as e:
         status, err = "error", str(e)
     finally:
-        results.append({"url": url, "status": status, "sec": round(time.time() - t0, 2), "error": err})
+        results.append({
+            "url": url,
+            "status": status,
+            "sec": round(time.time() - t0, 2),
+            "error": err
+        })
 
 async def main():
-    # Markdown-generator: bra default + lätt pruning av brus
+    # Crawl4AI: clean/fit markdown med lätt pruning av brus
     run_cfg = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         markdown_generator=DefaultMarkdownGenerator(
             content_filter=PruningContentFilter(
-                threshold=0.48,       # 0.35–0.55 brukar vara bra; höj = mer rens
+                threshold=0.48,          # höj till 0.55 om du vill rensa hårdare
                 threshold_type="fixed",
                 min_word_threshold=0
             )
@@ -185,16 +135,19 @@ async def main():
         word_count_threshold=1,
     )
 
+    # Läs URLer
     if SHEET_URL:
         urls = read_urls_from_sheet(SHEET_URL)
     else:
         urls = read_urls_from_txt(URLS_FILE)
 
     if not urls:
-        print("Found 0 URLs"); return
+        print("Found 0 URLs")
+        return
 
     print(f"Found {len(urls)} URLs")
 
+    # Kör med semafor (parallellism)
     results = []
     sem = asyncio.Semaphore(CONCURRENCY)
     browser = BrowserConfig(headless=True, verbose=False)
@@ -203,10 +156,16 @@ async def main():
         tasks = [crawl_one(crawler, u, run_cfg, sem, results) for u in urls]
         await asyncio.gather(*tasks)
 
+    # Summering i loggen
     total = sum(r["sec"] for r in results)
     ok = sum(1 for r in results if r["status"] == "ok")
     err = [r for r in results if r["status"] != "ok"]
-    print(json.dumps({"total_sec": round(total, 2), "ok": ok, "err_count": len(err), "errors": err}, ensure_ascii=False))
+    print(json.dumps({
+        "total_sec": round(total, 2),
+        "ok": ok,
+        "err_count": len(err),
+        "errors": err[:10]  # visa max 10 i loggen
+    }, ensure_ascii=False))
 
 if __name__ == "__main__":
     asyncio.run(main())
