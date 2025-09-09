@@ -1,16 +1,16 @@
 name: batch-crawl-to-n8n
 
 on:
-  # 1) Manuell/extern start via API (från n8n)
   workflow_dispatch:
     inputs:
       sheet_url:
-        description: "Google Sheet CSV (optional). If empty, uses repo urls.txt"
+        description: "Google Sheet CSV (optional). If empty, uses secret SHEET_URL or urls.txt"
         required: false
       concurrency:
         description: "Parallel fetches"
         required: false
         default: "4"
+
 
 concurrency:
   group: "batch-crawl"
@@ -20,7 +20,6 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
 
@@ -29,29 +28,45 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Cacha Playwright-browser för att spara Actions-minuter
+      # Cachea pip (sparar nedladdade hjul/whls)
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Cachea Playwright-browsers (största tidsbesparingen efter första körningen)
       - name: Cache Playwright browsers
-        id: cache-playwright
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-v1
+          restore-keys: |
+            ${{ runner.os }}-playwright-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install crawl4ai
+          pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
+      # Sätt SHEET_URL från inputs eller secrets (fallback till urls.txt om inget finns)
+      - name: Resolve SHEET_URL
+        run: |
+          if [ -n "${{ inputs.sheet_url }}" ]; then
+            echo "SHEET_URL=${{ inputs.sheet_url }}" >> $GITHUB_ENV
+          elif [ -n "${{ secrets.SHEET_URL }}" ]; then
+            echo "SHEET_URL=${{ secrets.SHEET_URL }}" >> $GITHUB_ENV
+          else
+            echo "No SHEET_URL provided (input/secret). Will use urls.txt."
+          fi
 
       - name: Run batch crawl
         env:
-          # Webhook till n8n (från repo secret)
           N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
-
-          # Om input saknas används secret SHEET_URL eller faller tillbaka till urls.txt
-          SHEET_URL: ${{ inputs.sheet_url || secrets.SHEET_URL }}
-
-          # Justerbar parallellism (från input, default 4)
+          SHEET_URL: ${{ env.SHEET_URL }}
           CONCURRENCY: ${{ inputs.concurrency }}
           URLS_FILE: urls.txt
           WAIT_MS: "6000"
